@@ -1,21 +1,26 @@
-// app.js (версия с автотреннигом и одной кнопкой предсказаний)
+// app.js (обновленная версия с Random Walk и новой диаграммой)
 import { DataLoader } from './data-loader.js';
 import { GRUModel } from './gru.js';
+import { RandomWalk } from './random-walk.js';
 
 class StockPredictorApp {
     constructor() {
         this.dataLoader = new DataLoader();
-        this.model = new GRUModel();
+        this.gruModel = new GRUModel();
+        this.randomWalk = new RandomWalk();
         this.charts = {
             combined: null,
             volatility: null,
-            prediction: null,
-            returnsComparison: null
+            comparison: null,
+            predictionsChart: null,
+            benchmark: null
         };
         this.isTraining = false;
         this.predictions = null;
+        this.randomWalkPredictions = null;
         this.insights = null;
         this.isModelTrained = false;
+        this.benchmarkResults = null;
         
         this.initUI();
         this.setupEventListeners();
@@ -35,7 +40,7 @@ class StockPredictorApp {
         // Меняем текст кнопки предсказаний
         const predictBtn = document.getElementById('predictBtn');
         if (predictBtn) {
-            predictBtn.textContent = '🔮 Show Predictions';
+            predictBtn.textContent = '🔮 Show Predictions & Benchmarks';
             predictBtn.disabled = true;
         }
     }
@@ -43,7 +48,6 @@ class StockPredictorApp {
     setupEventListeners() {
         document.getElementById('loadDataBtn').addEventListener('click', () => this.loadData());
         document.getElementById('viewDataBtn').addEventListener('click', () => this.displayInsights());
-        // Убираем обработчик для trainBtn и оставляем только predictBtn
         document.getElementById('predictBtn').addEventListener('click', () => this.autoTrainAndPredict());
     }
 
@@ -73,6 +77,9 @@ class StockPredictorApp {
             
             this.updateStatus('dataStatus', '✅ Data loaded! Click "Show Predictions"', 'success');
             
+            // Train Random Walk
+            this.trainRandomWalk();
+            
             // Автотреннинг модели при загрузке данных
             await this.autoTrainModel();
             
@@ -81,12 +88,24 @@ class StockPredictorApp {
         }
     }
 
+    trainRandomWalk() {
+        if (!this.dataLoader.returns || this.dataLoader.returns.length === 0) return;
+        
+        try {
+            this.randomWalk.train(this.dataLoader.returns);
+            console.log('✅ Random Walk model trained');
+        } catch (error) {
+            console.error('Random Walk training error:', error);
+        }
+    }
+
     async loadData() {
         try {
             this.updateStatus('dataStatus', 'Reloading...', 'info');
             this.dataLoader.dispose();
-            this.model.dispose();
+            this.gruModel.dispose();
             this.isModelTrained = false;
+            this.benchmarkResults = null;
             
             // Уничтожаем все графики
             Object.keys(this.charts).forEach(chart => this.destroyChart(chart));
@@ -97,6 +116,9 @@ class StockPredictorApp {
             this.insights = this.dataLoader.getInsights();
             this.displayInsights();
             this.createCombinedChart();
+            
+            // Train Random Walk
+            this.trainRandomWalk();
             
             this.updateStatus('dataStatus', '✅ Data reloaded!', 'success');
             
@@ -113,45 +135,50 @@ class StockPredictorApp {
         
         try {
             this.isTraining = true;
-            const epochs = 5; // Фиксированные 5 эпох
+            const epochs = 8; // Уменьшено для скорости, но достаточно для хороших результатов
             
-            this.updateStatus('trainingStatus', '🚀 Auto-training model (5 epochs)...', 'info');
-            
-            const startTime = Date.now();
+            this.updateStatus('trainingStatus', '🚀 Training improved GRU model...', 'info');
             
             // Ensure data is ready
             if (!this.dataLoader.X_train || !this.dataLoader.y_train) {
                 throw new Error('Training data not available.');
             }
             
-            // Create minimal callback for auto-training
             const callbacks = {
                 onEpochEnd: (epoch, logs) => {
                     const lossMsg = logs.loss ? `Loss: ${logs.loss.toFixed(6)}` : '';
+                    const valLossMsg = logs.val_loss ? `Val: ${logs.val_loss.toFixed(6)}` : '';
                     this.updateStatus('trainingStatus', 
-                        `⚡ Auto-training ${epoch + 1}/5 ${lossMsg}`,
+                        `⚡ Training ${epoch + 1}/${epochs} ${lossMsg} ${valLossMsg}`,
                         'info'
                     );
                 },
-                onTrainEnd: (totalTime) => {
+                onTrainEnd: (totalTime, metrics) => {
                     this.isTraining = false;
                     this.isModelTrained = true;
+                    const rmseMsg = metrics?.rmse ? `(RMSE: ${(metrics.rmse * 100).toFixed(3)}%)` : '';
                     this.updateStatus('trainingStatus', 
-                        `✅ Model auto-trained! Ready for predictions`,
+                        `✅ GRU model trained! ${rmseMsg}`,
                         'success'
                     );
                 }
             };
             
-            // Call the train method
-            await this.model.train(this.dataLoader.X_train, this.dataLoader.y_train, epochs, callbacks);
+            await this.gruModel.train(this.dataLoader.X_train, this.dataLoader.y_train, epochs, callbacks);
+            
+            // Оцениваем модель
+            const evaluation = this.gruModel.evaluate(this.dataLoader.X_test, this.dataLoader.y_test);
+            if (evaluation) {
+                console.log('GRU Evaluation:', evaluation);
+                this.gruEvaluation = evaluation;
+            }
             
         } catch (error) {
             this.isTraining = false;
             this.isModelTrained = false;
-            console.error('Auto-training error:', error);
+            console.error('Training error:', error);
             this.updateStatus('trainingStatus', 
-                `⚠️ Auto-training failed: ${error.message}`,
+                `⚠️ Training failed: ${error.message}`,
                 'warning'
             );
         }
@@ -164,12 +191,180 @@ class StockPredictorApp {
         
         if (this.isModelTrained) {
             await this.makePredictions();
+            await this.runBenchmark();
+            this.displayBenchmarkResults();
+            this.createPredictionsChart();
         } else {
             this.updateStatus('trainingStatus', 
                 '⚠️ Model not trained yet. Please wait...',
                 'warning'
             );
         }
+    }
+
+    async makePredictions() {
+        try {
+            this.updateStatus('trainingStatus', 'Generating predictions...', 'info');
+            
+            const normalizedData = this.dataLoader.normalizedData;
+            const windowSize = this.gruModel.windowSize;
+            
+            if (!normalizedData || normalizedData.length < windowSize) {
+                throw new Error('Not enough data');
+            }
+            
+            // GRU predictions
+            const lastWindow = normalizedData.slice(-windowSize);
+            const lastWindowFormatted = lastWindow.map(v => [v]);
+            const inputTensor = tf.tensor3d([lastWindowFormatted], [1, windowSize, 1]);
+            
+            const normalizedPredictions = await this.gruModel.predict(inputTensor);
+            inputTensor.dispose();
+            
+            this.predictions = normalizedPredictions[0].map(p => 
+                this.dataLoader.denormalize(p)
+            );
+            
+            // Random Walk predictions
+            const lastReturns = this.dataLoader.returns.slice(-windowSize);
+            this.randomWalkPredictions = this.randomWalk.predict(lastReturns, 5);
+            
+            console.log('GRU Predictions:', this.predictions);
+            console.log('Random Walk Predictions:', this.randomWalkPredictions);
+            
+            this.displayPredictions();
+            
+            this.updateStatus('trainingStatus', '✅ Predictions generated!', 'success');
+            
+        } catch (error) {
+            this.updateStatus('trainingStatus', `⚠️ ${error.message}`, 'warning');
+            console.error('Prediction error:', error);
+        }
+    }
+
+    async runBenchmark() {
+        if (!this.dataLoader.returns || this.dataLoader.returns.length === 0) return;
+        
+        try {
+            // Use last 100 days for benchmark
+            const testReturns = this.dataLoader.returns.slice(-100);
+            
+            // Generate GRU predictions for benchmark
+            const gruPredictions = [];
+            const windowSize = this.gruModel.windowSize;
+            
+            // We need to prepare data for GRU similar to training
+            for (let i = 0; i < testReturns.length - windowSize - 4; i++) {
+                const window = this.dataLoader.normalizedData.slice(
+                    this.dataLoader.normalizedData.length - testReturns.length + i,
+                    this.dataLoader.normalizedData.length - testReturns.length + i + windowSize
+                );
+                
+                if (window.length === windowSize) {
+                    const inputTensor = tf.tensor3d([window.map(v => [v])], [1, windowSize, 1]);
+                    const pred = await this.gruModel.predict(inputTensor);
+                    const denormPred = pred[0].map(p => this.dataLoader.denormalize(p));
+                    gruPredictions.push(denormPred[0]); // Take only first day prediction
+                    inputTensor.dispose();
+                    pred.dispose();
+                }
+            }
+            
+            // Get corresponding actual returns
+            const actualReturns = testReturns.slice(windowSize, windowSize + gruPredictions.length);
+            
+            // Evaluate GRU
+            const gruEvaluation = {
+                rmse: Math.sqrt(
+                    gruPredictions.reduce((sum, pred, i) => 
+                        sum + Math.pow(pred - actualReturns[i], 2), 0) / gruPredictions.length
+                ),
+                mae: gruPredictions.reduce((sum, pred, i) => 
+                    sum + Math.abs(pred - actualReturns[i]), 0) / gruPredictions.length,
+                directionAccuracy: (gruPredictions.reduce((acc, pred, i) => 
+                    acc + ((pred >= 0 && actualReturns[i] >= 0) || (pred < 0 && actualReturns[i] < 0) ? 1 : 0), 0) / gruPredictions.length * 100)
+            };
+            
+            // Evaluate Random Walk
+            const rwEvaluation = this.randomWalk.evaluate(actualReturns, 
+                this.randomWalk.predict(actualReturns, actualReturns.length).predictedReturns
+            );
+            
+            this.benchmarkResults = {
+                gru: gruEvaluation,
+                randomWalk: rwEvaluation,
+                comparison: {
+                    rmseImprovement: ((rwEvaluation.rmse - gruEvaluation.rmse) / rwEvaluation.rmse * 100).toFixed(1),
+                    maeImprovement: ((rwEvaluation.mae - gruEvaluation.mae) / rwEvaluation.mae * 100).toFixed(1),
+                    accuracyImprovement: (gruEvaluation.directionAccuracy - rwEvaluation.directionAccuracy).toFixed(1)
+                }
+            };
+            
+            console.log('Benchmark Results:', this.benchmarkResults);
+            
+        } catch (error) {
+            console.error('Benchmark error:', error);
+        }
+    }
+
+    displayBenchmarkResults() {
+        if (!this.benchmarkResults) return;
+        
+        const metricsContainer = document.getElementById('metricsContainer');
+        
+        // Добавляем карточки с результатами бенчмарка
+        const benchmarkCards = [
+            {
+                label: '📊 GRU RMSE',
+                value: (this.benchmarkResults.gru.rmse * 100).toFixed(3) + '%',
+                color: 'positive'
+            },
+            {
+                label: '🎲 Random Walk RMSE',
+                value: (this.benchmarkResults.randomWalk.rmse * 100).toFixed(3) + '%',
+                color: 'negative'
+            },
+            {
+                label: '⚡ RMSE Improvement',
+                value: this.benchmarkResults.comparison.rmseImprovement + '%',
+                color: 'positive'
+            },
+            {
+                label: '🎯 GRU Direction Accuracy',
+                value: this.benchmarkResults.gru.directionAccuracy.toFixed(1) + '%',
+                color: 'positive'
+            },
+            {
+                label: '🎲 RW Direction Accuracy',
+                value: this.benchmarkResults.randomWalk.directionAccuracy.toFixed(1) + '%',
+                color: 'negative'
+            },
+            {
+                label: '🚀 Accuracy Improvement',
+                value: this.benchmarkResults.comparison.accuracyImprovement + '%',
+                color: 'positive'
+            }
+        ];
+        
+        benchmarkCards.forEach((card, index) => {
+            const existingCard = metricsContainer.children[index + 10]; // После существующих инсайтов
+            if (existingCard) {
+                existingCard.querySelector('.insight-value').textContent = card.value;
+                existingCard.querySelector('.insight-label').textContent = card.label;
+                existingCard.querySelector('.insight-value').className = `insight-value ${card.color}`;
+            } else {
+                const newCard = document.createElement('div');
+                newCard.className = 'insight-card fade-in';
+                newCard.innerHTML = `
+                    <div class="insight-value ${card.color}">${card.value}</div>
+                    <div class="insight-label">${card.label}</div>
+                `;
+                metricsContainer.appendChild(newCard);
+            }
+        });
+        
+        // Создаем график сравнения моделей
+        this.createBenchmarkChart();
     }
 
     displayInsights() {
@@ -202,15 +397,14 @@ class StockPredictorApp {
             metricsContainer.appendChild(card);
         });
         
-        // Создаем график волатильности
         this.createVolatilityChart();
     }
 
     createCombinedChart() {
+        // Оставляем без изменений
         const historicalData = this.dataLoader.getHistoricalData();
         if (!historicalData) return;
         
-        // Уничтожаем старый график
         this.destroyChart('combined');
         
         const ctx = document.getElementById('historicalChart').getContext('2d');
@@ -220,7 +414,6 @@ class StockPredictorApp {
         const sma50 = this.insights?.sma50 || [];
         const sma200 = this.insights?.sma200 || [];
         
-        // Подготовка данных для SMA (с правильным смещением)
         const sma50Data = [...Array(dates.length - sma50.length).fill(null), ...sma50];
         const sma200Data = [...Array(dates.length - sma200.length).fill(null), ...sma200];
         
@@ -265,10 +458,7 @@ class StockPredictorApp {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                interaction: {
-                    mode: 'index',
-                    intersect: false
-                },
+                interaction: { mode: 'index', intersect: false },
                 plugins: {
                     title: {
                         display: true,
@@ -340,7 +530,6 @@ class StockPredictorApp {
     createVolatilityChart() {
         if (!this.insights?.rollingVolatilities) return;
         
-        // Уничтожаем старый график
         this.destroyChart('volatility');
         
         const ctx = document.getElementById('predictionChart').getContext('2d');
@@ -425,116 +614,68 @@ class StockPredictorApp {
         });
     }
 
-    async makePredictions() {
-        try {
-            this.updateStatus('trainingStatus', 'Generating predictions...', 'info');
-            
-            const normalizedData = this.dataLoader.normalizedData;
-            const windowSize = this.model.windowSize;
-            
-            if (!normalizedData || normalizedData.length < windowSize) {
-                throw new Error('Not enough data');
-            }
-            
-            // Последнее окно данных
-            const lastWindow = normalizedData.slice(-windowSize);
-            const lastWindowFormatted = lastWindow.map(v => [v]);
-            const inputTensor = tf.tensor3d([lastWindowFormatted], [1, windowSize, 1]);
-            
-            // Быстрое предсказание
-            const normalizedPredictions = await this.model.predict(inputTensor);
-            inputTensor.dispose();
-            
-            // Денормализация
-            this.predictions = normalizedPredictions[0].map(p => 
-                this.dataLoader.denormalize(p)
-            );
-            
-            // Показываем результаты
-            this.displayPredictions();
-            this.createReturnsComparisonChart();
-            
-            this.updateStatus('trainingStatus', '✅ Predictions generated!', 'success');
-            
-        } catch (error) {
-            this.updateStatus('trainingStatus', `⚠️ ${error.message}`, 'warning');
-            console.error('Prediction error:', error);
+    createBenchmarkChart() {
+        if (!this.benchmarkResults) return;
+        
+        const existingChart = this.charts.benchmark;
+        if (existingChart) {
+            existingChart.destroy();
         }
-    }
-
-    displayPredictions() {
-        const container = document.getElementById('predictionsContainer');
-        container.innerHTML = '';
         
-        const lastPrice = this.dataLoader.data[this.dataLoader.data.length - 1].price;
-        let currentPrice = lastPrice;
+        // Создаем новый контейнер для графика если нужно
+        const chartsGrid = document.querySelector('.charts-grid');
+        const existingBenchmarkCard = document.querySelector('#benchmarkCard');
         
-        this.predictions.forEach((pred, idx) => {
-            const day = idx + 1;
-            const returnPct = pred * 100;
-            const priceChange = currentPrice * pred;
-            const newPrice = currentPrice + priceChange;
-            
-            const card = document.createElement('div');
-            card.className = 'prediction-card fade-in';
-            card.style.animationDelay = `${idx * 0.1}s`;
-            card.innerHTML = `
-                <div class="prediction-day">Day +${day}</div>
-                <div class="prediction-value ${returnPct >= 0 ? 'positive' : 'negative'}">
-                    ${returnPct.toFixed(3)}%
+        if (!existingBenchmarkCard) {
+            const newCard = document.createElement('div');
+            newCard.className = 'card fade-in';
+            newCard.id = 'benchmarkCard';
+            newCard.innerHTML = `
+                <h2 class="card-title">📊 Model Comparison</h2>
+                <div class="chart-container">
+                    <canvas id="benchmarkChart"></canvas>
                 </div>
-                <div class="prediction-details">
-                    Price: $${newPrice.toFixed(2)}
-                </div>
-                <div class="prediction-details">
-                    Change: ${priceChange >= 0 ? '+' : ''}$${priceChange.toFixed(2)}
+                <div class="performance-badge badge-accurate" style="margin-top: 15px;">
+                    🏆 GRU vs Random Walk Performance
                 </div>
             `;
-            
-            container.appendChild(card);
-            currentPrice = newPrice;
-        });
-    }
-
-    createReturnsComparisonChart() {
-        const historicalData = this.dataLoader.getHistoricalData();
-        if (!historicalData || !this.predictions) return;
+            chartsGrid.appendChild(newCard);
+        }
         
-        // Уничтожаем старый график волатильности
-        this.destroyChart('volatility');
+        const ctx = document.getElementById('benchmarkChart').getContext('2d');
         
-        const ctx = document.getElementById('predictionChart').getContext('2d');
-        
-        const historicalReturns = historicalData.returns.slice(-30); // Последние 30 дней
-        const predictionReturns = this.predictions;
-        
-        // Создаем комбинированный массив
-        const allReturns = [...historicalReturns, ...predictionReturns];
-        const allLabels = [
-            ...Array.from({ length: historicalReturns.length }, (_, i) => `H-${historicalReturns.length - i}`),
-            ...Array.from({ length: predictionReturns.length }, (_, i) => `P+${i + 1}`)
+        const labels = ['RMSE (Lower is better)', 'MAE (Lower is better)', 'Direction Accuracy (Higher is better)'];
+        const gruData = [
+            this.benchmarkResults.gru.rmse * 100,
+            this.benchmarkResults.gru.mae * 100,
+            this.benchmarkResults.gru.directionAccuracy
+        ];
+        const rwData = [
+            this.benchmarkResults.randomWalk.rmse * 100,
+            this.benchmarkResults.randomWalk.mae * 100,
+            this.benchmarkResults.randomWalk.directionAccuracy
         ];
         
-        // Цвета: исторические - один цвет, предсказания - другой
-        const backgroundColors = allReturns.map((_, index) => 
-            index < historicalReturns.length 
-                ? 'rgba(255, 107, 129, 0.6)' 
-                : 'rgba(144, 238, 144, 0.6)'
-        );
-        
-        this.charts.returnsComparison = new Chart(ctx, {
+        this.charts.benchmark = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: allLabels,
-                datasets: [{
-                    label: 'Daily Returns',
-                    data: allReturns.map(r => r * 100),
-                    backgroundColor: backgroundColors,
-                    borderColor: backgroundColors.map(color => color.replace('0.6', '1')),
-                    borderWidth: 0.5,
-                    borderRadius: 2,
-                    borderSkipped: false
-                }]
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'GRU Model',
+                        data: gruData,
+                        backgroundColor: 'rgba(144, 238, 144, 0.7)',
+                        borderColor: '#90ee90',
+                        borderWidth: 1
+                    },
+                    {
+                        label: 'Random Walk',
+                        data: rwData,
+                        backgroundColor: 'rgba(255, 107, 129, 0.7)',
+                        borderColor: '#ff6b81',
+                        borderWidth: 1
+                    }
+                ]
             },
             options: {
                 responsive: true,
@@ -542,99 +683,20 @@ class StockPredictorApp {
                 plugins: {
                     title: {
                         display: true,
-                        text: 'Historical vs Predicted Returns',
+                        text: 'Model Performance Comparison',
                         color: '#ffccd5',
                         font: { size: 14, weight: 'normal' }
                     },
                     legend: {
-                        display: false
+                        labels: {
+                            color: '#ffccd5',
+                            font: { size: 11 }
+                        },
+                        position: 'top',
+                        align: 'center'
                     },
                     tooltip: {
                         backgroundColor: 'rgba(0, 0, 0, 0.7)',
                         titleColor: '#ffccd5',
                         bodyColor: '#ffccd5',
                         borderColor: '#ff6b81',
-                        borderWidth: 1,
-                        callbacks: {
-                            label: function(context) {
-                                const isHistorical = context.dataIndex < historicalReturns.length;
-                                const type = isHistorical ? 'Historical' : 'Predicted';
-                                return `${type}: ${context.parsed.y.toFixed(3)}%`;
-                            },
-                            footer: function(tooltipItems) {
-                                const index = tooltipItems[0].dataIndex;
-                                if (index >= historicalReturns.length) {
-                                    const predIndex = index - historicalReturns.length;
-                                    return `Prediction for Day +${predIndex + 1}`;
-                                }
-                                return null;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: {
-                        ticks: { 
-                            color: '#ffccd5',
-                            font: { size: 10 },
-                            maxRotation: 45
-                        },
-                        grid: { 
-                            color: 'rgba(255,255,255,0.05)',
-                            drawBorder: false
-                        }
-                    },
-                    y: {
-                        ticks: { 
-                            color: '#ffccd5',
-                            font: { size: 10 },
-                            callback: function(value) {
-                                return value.toFixed(1) + '%';
-                            }
-                        },
-                        grid: { 
-                            color: 'rgba(255,255,255,0.05)',
-                            drawBorder: false
-                        },
-                        title: {
-                            display: true,
-                            text: 'Return (%)',
-                            color: '#ffccd5',
-                            font: { size: 11 }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    updateStatus(elementId, message, type = 'info') {
-        const element = document.getElementById(elementId);
-        if (element) {
-            element.textContent = message;
-            element.className = `status ${type}`;
-            
-            // Обновляем иконку загрузки
-            if (elementId === 'loadDataBtn') {
-                const btn = document.getElementById('loadDataBtn');
-                if (message.includes('Loading')) {
-                    btn.innerHTML = '<span class="loader"></span> Loading...';
-                } else if (message.includes('✅')) {
-                    btn.innerHTML = '🔄 Reload Data';
-                }
-            }
-        }
-    }
-
-    dispose() {
-        this.dataLoader.dispose();
-        this.model.dispose();
-        // Уничтожаем все графики
-        Object.keys(this.charts).forEach(chart => this.destroyChart(chart));
-    }
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    window.app = new StockPredictorApp();
-    window.addEventListener('beforeunload', () => window.app?.dispose());
-});
