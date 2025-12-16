@@ -1,4 +1,4 @@
-// data-loader.js (исправленная версия)
+// data-loader.js (оптимизированная версия)
 class DataLoader {
     constructor() {
         this.data = null;
@@ -35,6 +35,7 @@ class DataLoader {
         this.dateLabels = [];
         this.returns = [];
 
+        // Fast parsing with pre-allocated arrays
         for (let i = 1; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
@@ -44,7 +45,7 @@ class DataLoader {
                 const dateStr = parts[0].trim();
                 const price = parseFloat(parts[1].trim());
                 
-                if (!isNaN(price) && price > 0 && price < 10000) {
+                if (!isNaN(price) && price > 0) {
                     parsedData.push({ date: dateStr, price: price });
                     this.dateLabels.push(dateStr);
                 }
@@ -59,15 +60,11 @@ class DataLoader {
         });
         
         // Calculate returns efficiently
-        if (parsedData.length > 1) {
-            const returns = new Array(parsedData.length - 1);
-            for (let i = 1; i < parsedData.length; i++) {
-                const returnVal = (parsedData[i].price - parsedData[i-1].price) / parsedData[i-1].price;
-                // Ограничиваем возвраты разумными значениями
-                returns[i-1] = Math.max(Math.min(returnVal, 0.5), -0.5);
-            }
-            this.returns = returns;
+        const returns = new Array(parsedData.length - 1);
+        for (let i = 1; i < parsedData.length; i++) {
+            returns[i-1] = (parsedData[i].price - parsedData[i-1].price) / parsedData[i-1].price;
         }
+        this.returns = returns;
 
         this.data = parsedData;
         
@@ -79,164 +76,39 @@ class DataLoader {
         }
     }
 
-    parseDate(dateStr) {
-        const parts = dateStr.split('.');
-        if (parts.length === 3) {
-            return new Date(parts[2], parts[1] - 1, parts[0]);
-        }
-        return new Date(dateStr);
-    }
-
-    prepareData(windowSize = 60, predictionHorizon = 5, testSplit = 0.2) {
-        if (!this.returns || this.returns.length === 0) {
-            throw new Error('No data available. Load CSV first.');
-        }
-
-        // Убираем NaN и бесконечные значения
-        const cleanReturns = this.returns.filter(r => 
-            !isNaN(r) && isFinite(r) && Math.abs(r) < 1
-        );
-        
-        if (cleanReturns.length === 0) {
-            throw new Error('No valid returns data after cleaning');
-        }
-
-        // Нормализация с защитой от деления на ноль
-        this.normalizeReturns(cleanReturns);
-
-        const totalSamples = this.normalizedData.length - windowSize - predictionHorizon + 1;
-        
-        if (totalSamples <= 10) {
-            throw new Error(`Not enough samples after cleaning: ${totalSamples}`);
-        }
-
-        // Create sequences
-        const sequences = [];
-        const targets = [];
-
-        for (let i = 0; i < totalSamples; i++) {
-            const seq = this.normalizedData.slice(i, i + windowSize).map(v => [v]);
-            const target = this.normalizedData.slice(i + windowSize, i + windowSize + predictionHorizon);
-            
-            // Проверяем на NaN
-            if (!seq.some(v => isNaN(v[0])) && !target.some(v => isNaN(v))) {
-                sequences.push(seq);
-                targets.push(target);
-            }
-        }
-
-        if (sequences.length === 0) {
-            throw new Error('No valid sequences created');
-        }
-
-        // Split chronologically
-        const splitIdx = Math.floor(sequences.length * (1 - testSplit));
-        if (splitIdx === 0) {
-            throw new Error('Not enough data for training split');
-        }
-
-        // Convert to tensors
-        try {
-            this.X_train = tf.tensor3d(sequences.slice(0, splitIdx), [splitIdx, windowSize, 1]);
-            this.y_train = tf.tensor2d(targets.slice(0, splitIdx), [splitIdx, predictionHorizon]);
-            
-            if (splitIdx < sequences.length) {
-                this.X_test = tf.tensor3d(sequences.slice(splitIdx), [sequences.length - splitIdx, windowSize, 1]);
-                this.y_test = tf.tensor2d(targets.slice(splitIdx), [sequences.length - splitIdx, predictionHorizon]);
-            }
-            
-            console.log(`Created ${sequences.length} samples: ${splitIdx} train, ${sequences.length - splitIdx} test`);
-            
-        } catch (error) {
-            console.error('Tensor creation error:', error);
-            throw new Error(`Failed to create tensors: ${error.message}`);
-        }
-        
-        return this;
-    }
-
-    normalizeReturns(returns) {
-        if (!returns || returns.length === 0) {
-            throw new Error('No returns data available');
-        }
-
-        // Находим min и max с защитой
-        const validReturns = returns.filter(r => !isNaN(r) && isFinite(r));
-        
-        if (validReturns.length === 0) {
-            this.min = -0.1;
-            this.max = 0.1;
-            this.normalizedData = returns.map(() => 0.5);
-            return;
-        }
-        
-        this.min = Math.min(...validReturns);
-        this.max = Math.max(...validReturns);
-        
-        // Защита от случая, когда все значения одинаковые
-        if (Math.abs(this.max - this.min) < 1e-10) {
-            this.min -= 0.01;
-            this.max += 0.01;
-        }
-        
-        const range = this.max - this.min;
-        this.normalizedData = returns.map(ret => {
-            const normalized = (ret - this.min) / range;
-            // Ограничиваем значения между 0 и 1
-            return Math.max(0, Math.min(1, normalized));
-        });
-        
-        console.log(`Normalization: min=${this.min.toFixed(6)}, max=${this.max.toFixed(6)}`);
-    }
-
-    denormalize(value) {
-        if (this.min === null || this.max === null) {
-            console.warn('Normalization parameters not available, using default');
-            return value * 0.02; // Возвращаем небольшое значение
-        }
-        
-        const range = this.max - this.min || 0.02; // Защита от деления на ноль
-        const denormalized = value * range + this.min;
-        
-        // Ограничиваем разумным диапазоном
-        return Math.max(Math.min(denormalized, 0.1), -0.1);
-    }
-
-    // Остальные методы без изменений...
     calculateInsights() {
         if (!this.data || this.data.length === 0) return;
         
         const prices = this.data.map(d => d.price);
-        const returns = this.returns.filter(r => !isNaN(r) && isFinite(r));
+        const returns = this.returns;
         
-        // Basic Statistics
+        // 1. Basic Statistics
         const lastPrice = prices[prices.length - 1];
         const firstPrice = prices[0];
         const totalReturn = (lastPrice - firstPrice) / firstPrice;
         
-        // Returns Statistics
-        const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length || 0;
-        const variance = returns.reduce((sq, n) => sq + Math.pow(n - meanReturn, 2), 0) / returns.length || 0.0001;
-        const stdReturn = Math.sqrt(Math.max(variance, 0.000001));
+        // 2. Daily Returns Statistics
+        const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((sq, n) => sq + Math.pow(n - meanReturn, 2), 0) / returns.length;
+        const stdReturn = Math.sqrt(variance);
         const annualizedVolatility = stdReturn * Math.sqrt(252);
         
-        // Rolling Volatility (20-day)
+        // 3. Rolling Volatility (20-day)
         const window = 20;
         const rollingVolatilities = [];
         for (let i = window; i <= returns.length; i++) {
             const windowReturns = returns.slice(i - window, i);
             const windowMean = windowReturns.reduce((a, b) => a + b, 0) / window;
             const windowVar = windowReturns.reduce((sq, n) => sq + Math.pow(n - windowMean, 2), 0) / window;
-            rollingVolatilities.push(Math.sqrt(Math.max(windowVar, 0)) * Math.sqrt(252));
+            rollingVolatilities.push(Math.sqrt(windowVar) * Math.sqrt(252));
         }
         
-        // SMA calculations
+        // 4. Trend Detection (Simple Moving Average Crossover)
         const sma50 = this.calculateSMA(prices, 50);
         const sma200 = this.calculateSMA(prices, 200);
-        const currentTrend = sma50.length > 0 && sma200.length > 0 && 
-                           sma50[sma50.length - 1] > sma200[sma200.length - 1] ? 'Bullish' : 'Bearish';
+        const currentTrend = sma50[sma50.length - 1] > sma200[sma200.length - 1] ? 'Bullish' : 'Bearish';
         
-        // Maximum Drawdown
+        // 5. Maximum Drawdown
         let maxDrawdown = 0;
         let peak = prices[0];
         for (let i = 1; i < prices.length; i++) {
@@ -258,22 +130,21 @@ class DataLoader {
                 meanDailyReturn: (meanReturn * 100).toFixed(4) + '%',
                 stdDailyReturn: (stdReturn * 100).toFixed(4) + '%',
                 annualizedVolatility: (annualizedVolatility * 100).toFixed(2) + '%',
-                sharpeRatio: (meanReturn / Math.max(stdReturn, 0.0001) * Math.sqrt(252)).toFixed(2),
+                sharpeRatio: (meanReturn / stdReturn * Math.sqrt(252)).toFixed(2),
                 positiveDays: ((returns.filter(r => r > 0).length / returns.length) * 100).toFixed(1) + '%'
             },
             trends: {
                 currentTrend: currentTrend,
-                sma50: sma50.length > 0 ? sma50[sma50.length - 1].toFixed(2) : 'N/A',
-                sma200: sma200.length > 0 ? sma200[sma200.length - 1].toFixed(2) : 'N/A',
-                aboveSMA200: sma200.length > 0 ? (lastPrice > sma200[sma200.length - 1] ? 'Yes' : 'No') : 'N/A',
-                trendStrength: sma200.length > 0 ? 
-                    Math.abs((sma50[sma50.length - 1] - sma200[sma200.length - 1]) / sma200[sma200.length - 1] * 100).toFixed(2) + '%' : 'N/A'
+                sma50: sma50[sma50.length - 1].toFixed(2),
+                sma200: sma200[sma200.length - 1].toFixed(2),
+                aboveSMA200: (lastPrice > sma200[sma200.length - 1]) ? 'Yes' : 'No',
+                trendStrength: Math.abs((sma50[sma50.length - 1] - sma200[sma200.length - 1]) / sma200[sma200.length - 1] * 100).toFixed(2) + '%'
             },
             volatility: {
-                currentRollingVol: rollingVolatilities.length > 0 ? (rollingVolatilities[rollingVolatilities.length - 1] || 0).toFixed(2) + '%' : 'N/A',
-                avgRollingVol: rollingVolatilities.length > 0 ? (rollingVolatilities.reduce((a, b) => a + b, 0) / rollingVolatilities.length).toFixed(2) + '%' : 'N/A',
-                maxRollingVol: rollingVolatilities.length > 0 ? (Math.max(...rollingVolatilities) || 0).toFixed(2) + '%' : 'N/A',
-                minRollingVol: rollingVolatilities.length > 0 ? (Math.min(...rollingVolatilities) || 0).toFixed(2) + '%' : 'N/A'
+                currentRollingVol: (rollingVolatilities[rollingVolatilities.length - 1] || 0).toFixed(2) + '%',
+                avgRollingVol: (rollingVolatilities.reduce((a, b) => a + b, 0) / rollingVolatilities.length).toFixed(2) + '%',
+                maxRollingVol: (Math.max(...rollingVolatilities) || 0).toFixed(2) + '%',
+                minRollingVol: (Math.min(...rollingVolatilities) || 0).toFixed(2) + '%'
             },
             rollingVolatilities: rollingVolatilities,
             sma50: sma50,
@@ -282,13 +153,79 @@ class DataLoader {
     }
     
     calculateSMA(prices, period) {
-        if (prices.length < period) return [];
         const sma = [];
         for (let i = period - 1; i < prices.length; i++) {
             const sum = prices.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
             sma.push(sum / period);
         }
         return sma;
+    }
+
+    parseDate(dateStr) {
+        const parts = dateStr.split('.');
+        if (parts.length === 3) {
+            return new Date(parts[2], parts[1] - 1, parts[0]);
+        }
+        return new Date(dateStr);
+    }
+
+    prepareData(windowSize = 60, predictionHorizon = 5, testSplit = 0.2) {
+        if (!this.returns || this.returns.length === 0) {
+            throw new Error('No data available. Load CSV first.');
+        }
+
+        const totalSamples = this.returns.length - windowSize - predictionHorizon + 1;
+        
+        if (totalSamples <= 0) {
+            throw new Error('Not enough data');
+        }
+
+        // Normalize returns
+        this.normalizeReturns();
+
+        // Create sequences using typed arrays for speed
+        const sequences = new Array(totalSamples);
+        const targets = new Array(totalSamples);
+
+        for (let i = 0; i < totalSamples; i++) {
+            sequences[i] = this.normalizedData.slice(i, i + windowSize).map(v => [v]);
+            targets[i] = this.normalizedData.slice(i + windowSize, i + windowSize + predictionHorizon);
+        }
+
+        // Split chronologically
+        const splitIdx = Math.floor(sequences.length * (1 - testSplit));
+        this.trainIndices = Array.from({ length: splitIdx }, (_, i) => i);
+        this.testIndices = Array.from({ length: sequences.length - splitIdx }, (_, i) => i + splitIdx);
+
+        // Convert to tensors
+        this.X_train = tf.tensor3d(sequences.slice(0, splitIdx), [splitIdx, windowSize, 1]);
+        this.y_train = tf.tensor2d(targets.slice(0, splitIdx), [splitIdx, predictionHorizon]);
+        this.X_test = tf.tensor3d(sequences.slice(splitIdx), [sequences.length - splitIdx, windowSize, 1]);
+        this.y_test = tf.tensor2d(targets.slice(splitIdx), [sequences.length - splitIdx, predictionHorizon]);
+
+        console.log(`Created ${sequences.length} samples: ${splitIdx} train, ${sequences.length - splitIdx} test`);
+        
+        return this;
+    }
+
+    normalizeReturns() {
+        if (!this.returns || this.returns.length === 0) {
+            throw new Error('No returns data available');
+        }
+
+        this.min = Math.min(...this.returns);
+        this.max = Math.max(...this.returns);
+        
+        const range = this.max - this.min || 1;
+        this.normalizedData = this.returns.map(ret => (ret - this.min) / range);
+    }
+
+    denormalize(value) {
+        if (this.min === null || this.max === null) {
+            throw new Error('Normalization parameters not available');
+        }
+        const range = this.max - this.min || 1;
+        return value * range + this.min;
     }
 
     getHistoricalData() {
@@ -302,6 +239,10 @@ class DataLoader {
         };
     }
 
+    getDataSummary() {
+        return this.insects.basic || null;
+    }
+    
     getInsights() {
         return this.insights;
     }
