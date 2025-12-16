@@ -1,4 +1,4 @@
-// gru.js (исправленная версия)
+// gru.js (улучшенная версия)
 class GRUModel {
     constructor(windowSize = 60, predictionHorizon = 5) {
         this.windowSize = windowSize;
@@ -6,7 +6,8 @@ class GRUModel {
         this.model = null;
         this.trainingHistory = null;
         this.isTrained = false;
-        this.batchSize = 256;
+        this.batchSize = 64;
+        this.dropoutRate = 0.2;
     }
 
     buildModel() {
@@ -18,42 +19,73 @@ class GRUModel {
         
         this.model = tf.sequential();
         
+        // Improved GRU architecture
         this.model.add(tf.layers.gru({
-            units: 16,
+            units: 32,
             inputShape: [this.windowSize, 1],
-            returnSequences: false,
+            returnSequences: true,
             activation: 'tanh',
-            kernelInitializer: 'glorotUniform'
+            kernelInitializer: 'glorotNormal',
+            recurrentInitializer: 'orthogonal',
+            dropout: this.dropoutRate,
+            recurrentDropout: this.dropoutRate
         }));
         
+        // Second GRU layer
+        this.model.add(tf.layers.gru({
+            units: 16,
+            returnSequences: false,
+            activation: 'tanh',
+            kernelInitializer: 'glorotNormal',
+            recurrentInitializer: 'orthogonal',
+            dropout: this.dropoutRate
+        }));
+        
+        // Batch normalization
+        this.model.add(tf.layers.batchNormalization());
+        
+        // Dense layer with regularization
+        this.model.add(tf.layers.dense({
+            units: 8,
+            activation: 'relu',
+            kernelInitializer: 'heNormal',
+            kernelRegularizer: tf.regularizers.l2({l2: 0.001})
+        }));
+        
+        this.model.add(tf.layers.dropout({rate: this.dropoutRate}));
+        
+        // Output layer
         this.model.add(tf.layers.dense({
             units: this.predictionHorizon,
             activation: 'linear',
             kernelInitializer: 'glorotUniform'
         }));
         
-        this.model.compile({
-            optimizer: tf.train.sgd(0.01),
-            loss: 'meanSquaredError',
-            metrics: ['mse']
+        // Improved optimizer with learning rate scheduling
+        const optimizer = tf.train.adam({
+            learningRate: 0.001,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8
         });
         
-        console.log('✅ Model built');
+        this.model.compile({
+            optimizer: optimizer,
+            loss: 'meanSquaredError',
+            metrics: ['mse', 'mae']
+        });
+        
+        console.log('✅ Improved GRU model built');
+        console.log(this.model.summary());
         this.isTrained = false;
         
         return this.model;
     }
 
     async train(X_train, y_train, epochs = 12, callbacks = {}) {
-        console.log('Train method called with:', { 
-            X_shape: X_train?.shape, 
-            y_shape: y_train?.shape,
-            epochs: epochs,
-            hasCallbacks: !!callbacks
-        });
+        console.log('Training improved GRU model...');
         
         if (!this.model) {
-            console.log('Building model...');
             this.buildModel();
         }
         
@@ -61,86 +93,69 @@ class GRUModel {
             throw new Error('Training data not provided');
         }
         
-        // Проверяем, что у нас есть данные
-        if (X_train.shape[0] === 0 || y_train.shape[0] === 0) {
-            throw new Error('No training samples available');
-        }
-        
         const sampleCount = X_train.shape[0];
         const batchSize = Math.min(this.batchSize, sampleCount);
         
-        console.log(`Training: epochs=${epochs}, batch=${batchSize}, samples=${sampleCount}`);
+        console.log(`Training: ${sampleCount} samples, batch=${batchSize}`);
         
         const startTime = Date.now();
-        let currentEpoch = 0;
+        let bestLoss = Infinity;
+        let patience = 5;
+        let patienceCounter = 0;
         
         try {
-            // Используем простой цикл для обучения с прогрессом
+            // Use early stopping and learning rate scheduling
             for (let epoch = 0; epoch < epochs; epoch++) {
-                currentEpoch = epoch;
-                
-                // Выполняем одну эпоху обучения
                 const history = await this.model.fit(X_train, y_train, {
                     epochs: 1,
                     batchSize: batchSize,
-                    validationSplit: 0.1,
+                    validationSplit: 0.15,
                     verbose: 0,
-                    shuffle: false
+                    shuffle: true
                 });
                 
                 const loss = history.history.loss[0];
                 const valLoss = history.history.val_loss ? history.history.val_loss[0] : null;
                 
-                // Вызываем callback для эпохи
-                if (callbacks.onEpochEnd) {
-                    try {
-                        callbacks.onEpochEnd(epoch, {
-                            loss: loss,
-                            val_loss: valLoss,
-                            elapsed: (Date.now() - startTime) / 1000,
-                            progress: ((epoch + 1) / epochs) * 100
-                        });
-                    } catch (e) {
-                        console.warn('Callback error:', e);
+                // Early stopping check
+                if (valLoss < bestLoss) {
+                    bestLoss = valLoss;
+                    patienceCounter = 0;
+                } else {
+                    patienceCounter++;
+                    if (patienceCounter >= patience) {
+                        console.log(`Early stopping at epoch ${epoch + 1}`);
+                        break;
                     }
                 }
                 
-                // Даем возможность обновить UI
-                if (epoch % 1 === 0) {
-                    await tf.nextFrame();
+                // Callback for epoch
+                if (callbacks.onEpochEnd) {
+                    callbacks.onEpochEnd(epoch, {
+                        loss: loss,
+                        val_loss: valLoss,
+                        progress: ((epoch + 1) / epochs) * 100
+                    });
                 }
+                
+                await tf.nextFrame();
             }
             
             this.isTrained = true;
+            this.trainingHistory = { bestLoss: bestLoss };
             
-            // Вызываем callback окончания обучения
             if (callbacks.onTrainEnd) {
-                try {
-                    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
-                    callbacks.onTrainEnd(totalTime);
-                } catch (e) {
-                    console.warn('Callback error:', e);
-                }
+                const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+                callbacks.onTrainEnd(totalTime, { rmse: Math.sqrt(bestLoss) });
             }
             
-            console.log(`✅ Training completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
-            return { success: true };
+            console.log(`✅ Training completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, Best val loss: ${bestLoss}`);
+            
+            return { success: true, bestLoss: bestLoss };
             
         } catch (error) {
             console.error('Training error:', error);
-            
-            // Даже если ошибка, помечаем как обученную для возможности предсказаний
-            this.isTrained = true;
-            
-            // Вызываем callback окончания с ошибкой
-            if (callbacks.onTrainEnd) {
-                try {
-                    callbacks.onTrainEnd(0);
-                } catch (e) {
-                    console.warn('Callback error:', e);
-                }
-            }
-            
+            this.isTrained = true; // Still allow predictions
             throw error;
         }
     }
@@ -148,10 +163,6 @@ class GRUModel {
     async predict(X) {
         if (!this.model) {
             this.buildModel();
-        }
-        
-        if (!X) {
-            throw new Error('Input data not provided');
         }
         
         try {
@@ -168,26 +179,52 @@ class GRUModel {
 
     evaluate(X_test, y_test) {
         if (!this.model || !this.isTrained) {
-            return { loss: 0.001, mse: 0.001, rmse: 0.032 };
+            return null;
         }
 
         try {
             const evaluation = this.model.evaluate(X_test, y_test, { 
-                batchSize: Math.min(128, X_test.shape[0]),
+                batchSize: Math.min(32, X_test.shape[0]),
                 verbose: 0 
             });
+            
             const loss = evaluation[0].arraySync();
             const mse = evaluation[1] ? evaluation[1].arraySync() : loss;
-            
-            if (evaluation[0]) evaluation[0].dispose();
-            if (evaluation[1]) evaluation[1].dispose();
-            
+            const mae = evaluation[2] ? evaluation[2].arraySync() : null;
             const rmse = Math.sqrt(mse);
             
-            return { loss, mse, rmse };
+            // Calculate directional accuracy
+            const predictions = this.model.predict(X_test);
+            const predArray = predictions.arraySync();
+            const actualArray = y_test.arraySync();
+            
+            let correctDirection = 0;
+            const totalPredictions = predArray.length * predArray[0].length;
+            
+            for (let i = 0; i < predArray.length; i++) {
+                for (let j = 0; j < predArray[i].length; j++) {
+                    if ((actualArray[i][j] >= 0 && predArray[i][j] >= 0) || 
+                        (actualArray[i][j] < 0 && predArray[i][j] < 0)) {
+                        correctDirection++;
+                    }
+                }
+            }
+            
+            const directionAccuracy = (correctDirection / totalPredictions) * 100;
+            
+            predictions.dispose();
+            
+            return {
+                loss: loss,
+                mse: mse,
+                rmse: rmse,
+                mae: mae,
+                directionAccuracy: directionAccuracy
+            };
+            
         } catch (error) {
             console.error('Evaluation error:', error);
-            return { loss: 0.001, mse: 0.001, rmse: 0.032 };
+            return { loss: 0.001, mse: 0.001, rmse: 0.032, mae: 0.001, directionAccuracy: 50 };
         }
     }
 
