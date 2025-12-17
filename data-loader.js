@@ -1,226 +1,257 @@
-// data-loader.js - Решение проблемы CORS
+// data-loader.js (оптимизированная версия)
 class DataLoader {
     constructor() {
-        this.data = [];
-        this.normalizedData = [];
-        this.returns = [];
+        this.data = null;
+        this.normalizedData = null;
+        this.X_train = null;
+        this.y_train = null;
+        this.X_test = null;
+        this.y_test = null;
         this.min = null;
         this.max = null;
-        this.insights = null;
+        this.dateLabels = [];
+        this.returns = [];
+        this.trainIndices = [];
+        this.testIndices = [];
+        this.dataUrl = 'https://raw.githubusercontent.com/buschevapoly-del/again/main/my_data.csv';
+        this.insights = {};
     }
 
     async loadCSVFromGitHub() {
         try {
-            console.log('Пробую загрузить данные...');
-            
-            // Вариант 1: Используем GitHub API для обхода CORS
-            const apiUrl = 'https://api.github.com/repos/buschevapoly-del/again/contents/my_data.csv';
-            
-            const response = await fetch(apiUrl, {
-                headers: {
-                    'Accept': 'application/vnd.github.v3+json',
-                    'User-Agent': 'StockPredictorApp'
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`GitHub API error: ${response.status}`);
-            }
-            
-            const fileData = await response.json();
-            
-            // Декодируем base64 содержимое
-            const csvText = atob(fileData.content);
-            
-            console.log('Данные получены через GitHub API');
-            this.parseCSV(csvText);
-            
-            if (this.data.length === 0) {
-                throw new Error('CSV файл пуст после парсинга');
-            }
-            
-            console.log(`Загружено ${this.data.length} записей`);
+            const response = await fetch(this.dataUrl);
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            const content = await response.text();
+            this.parseCSV(content);
             return this.data;
-            
         } catch (error) {
-            console.error('Ошибка:', error);
-            
-            // Вариант 2: Если GitHub API не работает, используем CORS proxy
-            console.log('Пробую через CORS proxy...');
-            
-            try {
-                // Используем несколько разных proxy
-                const proxies = [
-                    'https://api.allorigins.win/raw?url=',
-                    'https://corsproxy.io/?',
-                    'https://thingproxy.freeboard.io/fetch/'
-                ];
-                
-                const targetUrl = 'https://raw.githubusercontent.com/buschevapoly-del/again/main/my_data.csv';
-                
-                for (const proxy of proxies) {
-                    try {
-                        const response = await fetch(proxy + encodeURIComponent(targetUrl), {
-                            timeout: 10000
-                        });
-                        
-                        if (response.ok) {
-                            const csvText = await response.text();
-                            this.parseCSV(csvText);
-                            
-                            if (this.data.length > 0) {
-                                console.log(`✅ Данные загружены через proxy: ${proxy}`);
-                                return this.data;
-                            }
-                        }
-                    } catch (proxyError) {
-                        console.log(`Proxy ${proxy} не сработал:`, proxyError.message);
-                    }
-                }
-                
-                throw new Error('Все методы загрузки не сработали');
-                
-            } catch (proxyError) {
-                // Вариант 3: Используем встроенные данные как fallback
-                console.log('Использую встроенные данные...');
-                
-                // Берем первые несколько строк из вашего CSV (уже видимых ранее)
-                const csvText = `Date;S&P500
-03.01.2000;1455.219970703125
-04.01.2000;1399.4200439453125
-05.01.2000;1402.1099853515625
-06.01.2000;1403.449951171875
-07.01.2000;1441.469970703125
-10.01.2000;1457.5999755859375
-11.01.2000;1438.56005859375
-12.01.2000;1432.25
-13.01.2000;1449.6800537109375
-14.01.2000;1465.1500244140625
-18.01.2000;1455.1400146484375
-19.01.2000;1455.9000244140625
-20.01.2000;1445.5699462890625
-21.01.2000;1441.3599853515625
-24.01.2000;1401.530029296875
-25.01.2000;1410.030029296875
-26.01.2000;1404.0899658203125
-27.01.2000;1398.56005859375
-28.01.2000;1360.1600341796875
-31.01.2000;1394.4599609375
-01.02.2000;1409.280029296875
-02.02.2000;1409.1199951171875
-03.02.2000;1424.969970703125
-04.02.2000;1424.3699951171875`;
-                
-                this.parseCSV(csvText);
-                console.log(`✅ Использовано ${this.data.length} встроенных записей`);
-                
-                return this.data;
-            }
+            throw new Error(`Failed to load data: ${error.message}`);
         }
     }
 
-    parseCSV(csvText) {
-        this.data = [];
-        const lines = csvText.trim().split('\n');
-        
-        // Простой парсинг
+    parseCSV(content) {
+        const lines = content.trim().split('\n');
+        const parsedData = [];
+        this.dateLabels = [];
+        this.returns = [];
+
+        // Fast parsing with pre-allocated arrays
         for (let i = 1; i < lines.length; i++) {
             const line = lines[i].trim();
             if (!line) continue;
-            
+
             const parts = line.split(';');
-            if (parts.length >= 2 && parts[1].trim() !== '') {
+            if (parts.length >= 2) {
+                const dateStr = parts[0].trim();
                 const price = parseFloat(parts[1].trim());
+                
                 if (!isNaN(price) && price > 0) {
-                    this.data.push({
-                        date: parts[0].trim(),
-                        price: price
-                    });
+                    parsedData.push({ date: dateStr, price: price });
+                    this.dateLabels.push(dateStr);
                 }
             }
         }
+
+        // Sort by date
+        parsedData.sort((a, b) => {
+            const dateA = this.parseDate(a.date);
+            const dateB = this.parseDate(b.date);
+            return dateA - dateB;
+        });
         
-        // Рассчитываем returns
-        if (this.data.length > 1) {
-            this.returns = [];
-            for (let i = 1; i < this.data.length; i++) {
-                const returnVal = (this.data[i].price - this.data[i-1].price) / this.data[i-1].price;
-                this.returns.push(returnVal);
-            }
+        // Calculate returns efficiently
+        const returns = new Array(parsedData.length - 1);
+        for (let i = 1; i < parsedData.length; i++) {
+            returns[i-1] = (parsedData[i].price - parsedData[i-1].price) / parsedData[i-1].price;
         }
+        this.returns = returns;
+
+        this.data = parsedData;
         
-        console.log(`Парсинг завершен: ${this.data.length} записей, ${this.returns.length} returns`);
+        // Calculate insights
+        this.calculateInsights();
+        
+        if (this.data.length < 65) {
+            throw new Error(`Insufficient data. Need at least 65 days, got ${this.data.length}`);
+        }
     }
 
-    prepareData() {
-        if (this.returns.length === 0) {
-            throw new Error('Нет данных для подготовки');
+    calculateInsights() {
+        if (!this.data || this.data.length === 0) return;
+        
+        const prices = this.data.map(d => d.price);
+        const returns = this.returns;
+        
+        // 1. Basic Statistics
+        const lastPrice = prices[prices.length - 1];
+        const firstPrice = prices[0];
+        const totalReturn = (lastPrice - firstPrice) / firstPrice;
+        
+        // 2. Daily Returns Statistics
+        const meanReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance = returns.reduce((sq, n) => sq + Math.pow(n - meanReturn, 2), 0) / returns.length;
+        const stdReturn = Math.sqrt(variance);
+        const annualizedVolatility = stdReturn * Math.sqrt(252);
+        
+        // 3. Rolling Volatility (20-day)
+        const window = 20;
+        const rollingVolatilities = [];
+        for (let i = window; i <= returns.length; i++) {
+            const windowReturns = returns.slice(i - window, i);
+            const windowMean = windowReturns.reduce((a, b) => a + b, 0) / window;
+            const windowVar = windowReturns.reduce((sq, n) => sq + Math.pow(n - windowMean, 2), 0) / window;
+            rollingVolatilities.push(Math.sqrt(windowVar) * Math.sqrt(252));
         }
         
-        // Нормализация
+        // 4. Trend Detection (Simple Moving Average Crossover)
+        const sma50 = this.calculateSMA(prices, 50);
+        const sma200 = this.calculateSMA(prices, 200);
+        const currentTrend = sma50[sma50.length - 1] > sma200[sma200.length - 1] ? 'Bullish' : 'Bearish';
+        
+        // 5. Maximum Drawdown
+        let maxDrawdown = 0;
+        let peak = prices[0];
+        for (let i = 1; i < prices.length; i++) {
+            if (prices[i] > peak) peak = prices[i];
+            const drawdown = (peak - prices[i]) / peak;
+            if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+        }
+        
+        this.insights = {
+            basic: {
+                totalDays: this.data.length,
+                dateRange: `${this.data[0].date} to ${this.data[this.data.length - 1].date}`,
+                firstPrice: firstPrice.toFixed(2),
+                lastPrice: lastPrice.toFixed(2),
+                totalReturn: (totalReturn * 100).toFixed(2) + '%',
+                maxDrawdown: (maxDrawdown * 100).toFixed(2) + '%'
+            },
+            returns: {
+                meanDailyReturn: (meanReturn * 100).toFixed(4) + '%',
+                stdDailyReturn: (stdReturn * 100).toFixed(4) + '%',
+                annualizedVolatility: (annualizedVolatility * 100).toFixed(2) + '%',
+                sharpeRatio: (meanReturn / stdReturn * Math.sqrt(252)).toFixed(2),
+                positiveDays: ((returns.filter(r => r > 0).length / returns.length) * 100).toFixed(1) + '%'
+            },
+            trends: {
+                currentTrend: currentTrend,
+                sma50: sma50[sma50.length - 1].toFixed(2),
+                sma200: sma200[sma200.length - 1].toFixed(2),
+                aboveSMA200: (lastPrice > sma200[sma200.length - 1]) ? 'Yes' : 'No',
+                trendStrength: Math.abs((sma50[sma50.length - 1] - sma200[sma200.length - 1]) / sma200[sma200.length - 1] * 100).toFixed(2) + '%'
+            },
+            volatility: {
+                currentRollingVol: (rollingVolatilities[rollingVolatilities.length - 1] || 0).toFixed(2) + '%',
+                avgRollingVol: (rollingVolatilities.reduce((a, b) => a + b, 0) / rollingVolatilities.length).toFixed(2) + '%',
+                maxRollingVol: (Math.max(...rollingVolatilities) || 0).toFixed(2) + '%',
+                minRollingVol: (Math.min(...rollingVolatilities) || 0).toFixed(2) + '%'
+            },
+            rollingVolatilities: rollingVolatilities,
+            sma50: sma50,
+            sma200: sma200
+        };
+    }
+    
+    calculateSMA(prices, period) {
+        const sma = [];
+        for (let i = period - 1; i < prices.length; i++) {
+            const sum = prices.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
+            sma.push(sum / period);
+        }
+        return sma;
+    }
+
+    parseDate(dateStr) {
+        const parts = dateStr.split('.');
+        if (parts.length === 3) {
+            return new Date(parts[2], parts[1] - 1, parts[0]);
+        }
+        return new Date(dateStr);
+    }
+
+    prepareData(windowSize = 60, predictionHorizon = 5, testSplit = 0.2) {
+        if (!this.returns || this.returns.length === 0) {
+            throw new Error('No data available. Load CSV first.');
+        }
+
+        const totalSamples = this.returns.length - windowSize - predictionHorizon + 1;
+        
+        if (totalSamples <= 0) {
+            throw new Error('Not enough data');
+        }
+
+        // Normalize returns
+        this.normalizeReturns();
+
+        // Create sequences using typed arrays for speed
+        const sequences = new Array(totalSamples);
+        const targets = new Array(totalSamples);
+
+        for (let i = 0; i < totalSamples; i++) {
+            sequences[i] = this.normalizedData.slice(i, i + windowSize).map(v => [v]);
+            targets[i] = this.normalizedData.slice(i + windowSize, i + windowSize + predictionHorizon);
+        }
+
+        // Split chronologically
+        const splitIdx = Math.floor(sequences.length * (1 - testSplit));
+        this.trainIndices = Array.from({ length: splitIdx }, (_, i) => i);
+        this.testIndices = Array.from({ length: sequences.length - splitIdx }, (_, i) => i + splitIdx);
+
+        // Convert to tensors
+        this.X_train = tf.tensor3d(sequences.slice(0, splitIdx), [splitIdx, windowSize, 1]);
+        this.y_train = tf.tensor2d(targets.slice(0, splitIdx), [splitIdx, predictionHorizon]);
+        this.X_test = tf.tensor3d(sequences.slice(splitIdx), [sequences.length - splitIdx, windowSize, 1]);
+        this.y_test = tf.tensor2d(targets.slice(splitIdx), [sequences.length - splitIdx, predictionHorizon]);
+
+        console.log(`Created ${sequences.length} samples: ${splitIdx} train, ${sequences.length - splitIdx} test`);
+        
+        return this;
+    }
+
+    normalizeReturns() {
+        if (!this.returns || this.returns.length === 0) {
+            throw new Error('No returns data available');
+        }
+
         this.min = Math.min(...this.returns);
         this.max = Math.max(...this.returns);
-        const range = this.max - this.min || 0.02;
         
-        this.normalizedData = this.returns.map(r => (r - this.min) / range);
-        
-        // Создаем тренировочные данные
-        const windowSize = 60;
-        const predictionHorizon = 5;
-        
-        if (this.normalizedData.length >= windowSize + predictionHorizon) {
-            const sequences = [];
-            const targets = [];
-            
-            const samplesCount = Math.min(50, this.normalizedData.length - windowSize - predictionHorizon + 1);
-            
-            for (let i = 0; i < samplesCount; i++) {
-                sequences.push(this.normalizedData.slice(i, i + windowSize).map(v => [v]));
-                targets.push(this.normalizedData.slice(i + windowSize, i + windowSize + predictionHorizon));
-            }
-            
-            if (sequences.length > 0) {
-                this.X_train = tf.tensor3d(sequences, [sequences.length, windowSize, 1]);
-                this.y_train = tf.tensor2d(targets, [targets.length, predictionHorizon]);
-            }
-        }
+        const range = this.max - this.min || 1;
+        this.normalizedData = this.returns.map(ret => (ret - this.min) / range);
     }
 
     denormalize(value) {
-        if (this.min === null || this.max === null) return value * 0.02;
-        return value * (this.max - this.min) + this.min;
+        if (this.min === null || this.max === null) {
+            throw new Error('Normalization parameters not available');
+        }
+        const range = this.max - this.min || 1;
+        return value * range + this.min;
     }
 
-    getInsights() {
-        if (this.data.length === 0) {
-            return { 
-                basic: { 
-                    totalReturn: '0%',
-                    totalDays: '0',
-                    firstPrice: 'N/A',
-                    lastPrice: 'N/A'
-                } 
-            };
-        }
-        
-        const firstPrice = this.data[0].price;
-        const lastPrice = this.data[this.data.length - 1].price;
-        const totalReturn = ((lastPrice - firstPrice) / firstPrice * 100).toFixed(2);
+    getHistoricalData() {
+        if (!this.data) return null;
         
         return {
-            basic: {
-                totalDays: this.data.length.toString(),
-                dateRange: `${this.data[0].date} - ${this.data[this.data.length - 1].date}`,
-                firstPrice: `$${firstPrice.toFixed(2)}`,
-                lastPrice: `$${lastPrice.toFixed(2)}`,
-                totalReturn: `${totalReturn}%`
-            }
+            dates: this.dateLabels,
+            prices: this.data.map(d => d.price),
+            returns: this.returns,
+            normalizedReturns: this.normalizedData || []
         };
     }
 
+    getDataSummary() {
+        return this.insects.basic || null;
+    }
+    
+    getInsights() {
+        return this.insights;
+    }
+
     dispose() {
-        if (this.X_train) this.X_train.dispose();
-        if (this.y_train) this.y_train.dispose();
+        [this.X_train, this.y_train, this.X_test, this.y_test].forEach(tensor => {
+            if (tensor) tensor.dispose();
+        });
+        this.X_train = this.y_train = this.X_test = this.y_test = this.normalizedData = null;
     }
 }
 
